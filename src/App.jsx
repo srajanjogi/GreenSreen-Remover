@@ -76,9 +76,9 @@ function App() {
       const colorValue = `0x${hex}`;
 
       // Convert strength (0-100) to similarity (0.01-0.4) for FFmpeg
-      // Higher strength = lower similarity = more aggressive keying
-      // Map: strength 0 -> similarity 0.4, strength 100 -> similarity 0.01
-      const similarity = 0.4 - (settings.strength / 100) * 0.39;
+      // Higher strength = higher similarity = stronger keying
+      // Map: strength 0 -> similarity 0.01, strength 100 -> similarity 0.4
+      const similarity = 0.01 + (settings.strength / 100) * 0.39;
       
       // Convert edgeBlur (0-100) to actual blur value (0-10) for FFmpeg
       const edgeBlur = settings.edgeBlur / 10;
@@ -96,20 +96,21 @@ function App() {
         edgeBlur: edgeBlur
       });
 
-      // After successful processing, update the preview to show the processed video
-      const processedVideoUrl = await window.electronAPI.getVideoUrl(outputPath);
-      setVideoUrl(processedVideoUrl);
-      
+      // Only update the preview if this is a preview operation
+      // For exports, keep the current preview (if any) to avoid switching back to original
       if (isPreview) {
+        const processedVideoUrl = await window.electronAPI.getVideoUrl(outputPath);
+        setVideoUrl(processedVideoUrl);
         setIsPreviewMode(true);
+        
+        // Force video element to reload with the new source
+        setTimeout(() => {
+          if (videoRef.current) {
+            videoRef.current.load();
+          }
+        }, 100);
       }
-      
-      // Force video element to reload with the new source
-      setTimeout(() => {
-        if (videoRef.current) {
-          videoRef.current.load();
-        }
-      }, 100);
+      // For exports, don't change the videoUrl - keep showing the preview if it exists
     } catch (error) {
       console.error('Processing error:', error);
       alert(`Error processing video: ${error.message}`);

@@ -17,6 +17,30 @@ try {
 
 let mainWindow;
 
+function waitForServer(url, maxAttempts = 30, interval = 1000) {
+  return new Promise((resolve, reject) => {
+    const http = require('http');
+    let attempts = 0;
+    
+    const checkServer = () => {
+      attempts++;
+      const req = http.get(url, (res) => {
+        resolve();
+      });
+      
+      req.on('error', () => {
+        if (attempts >= maxAttempts) {
+          reject(new Error(`Server at ${url} did not become available after ${maxAttempts} attempts`));
+        } else {
+          setTimeout(checkServer, interval);
+        }
+      });
+    };
+    
+    checkServer();
+  });
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -32,10 +56,21 @@ function createWindow() {
     ? 'http://localhost:5173'
     : `file://${path.join(__dirname, '../dist/index.html')}`;
   
-  mainWindow.loadURL(startUrl);
-
   if (isDev) {
-    mainWindow.webContents.openDevTools();
+    // Wait for Vite dev server to be ready
+    waitForServer(startUrl)
+      .then(() => {
+        mainWindow.loadURL(startUrl);
+        if (isDev) {
+          mainWindow.webContents.openDevTools();
+        }
+      })
+      .catch((err) => {
+        console.error('Failed to connect to dev server:', err);
+        mainWindow.loadURL(startUrl); // Try anyway
+      });
+  } else {
+    mainWindow.loadURL(startUrl);
   }
 
   mainWindow.on('closed', () => {
@@ -133,19 +168,26 @@ ipcMain.handle('get-temp-video-path', async () => {
 
 ipcMain.handle('detect-green-color', async (event, videoPath) => {
   return new Promise((resolve, reject) => {
+    // Validate video path
+    if (!videoPath || !fs.existsSync(videoPath)) {
+      console.error('Video path is invalid or file does not exist:', videoPath);
+      resolve('#00ff00'); // Fallback to default green
+      return;
+    }
+
     const os = require('os');
     const tempDir = os.tmpdir();
     const tempFramePath = path.join(tempDir, `frame_${Date.now()}.png`);
     
-    // Extract a frame from the middle of the video (1 second in, or middle if video is short)
-    // Sample pixels from corners and edges where green screen typically is
+    // Extract a frame from the video using standard FFmpeg command
+    // This is more reliable than .screenshots()
     ffmpeg(videoPath)
-      .screenshots({
-        timestamps: ['00:00:01.000'], // 1 second into video
-        filename: path.basename(tempFramePath),
-        folder: path.dirname(tempFramePath),
-        size: '320x240' // Small size for faster processing
-      })
+      .outputOptions([
+        '-ss', '00:00:01.000', // Seek to 1 second
+        '-vframes', '1',        // Extract 1 frame
+        '-vf', 'scale=320:240'  // Scale to small size for faster processing
+      ])
+      .output(tempFramePath)
       .on('end', async () => {
         try {
           // Read the frame image and sample corner/edge pixels
@@ -159,14 +201,18 @@ ipcMain.handle('detect-green-color', async (event, videoPath) => {
           ];
           
           // Use FFmpeg to get pixel values from corners
+          // Extract a 1x1 pixel from each corner
           const timestamp = Date.now();
           const pixelPromises = corners.map((corner, index) => {
             return new Promise((resolvePixel) => {
               const tempPixelPath = path.join(tempDir, `pixel_${timestamp}_${index}.raw`);
               ffmpeg(tempFramePath)
                 .videoFilters(`crop=1:1:${corner.x}:${corner.y}`)
-                .format('rawvideo')
-                .outputOptions(['-pix_fmt', 'rgb24', '-frames:v', '1'])
+                .outputOptions([
+                  '-pix_fmt', 'rgb24',
+                  '-frames:v', '1',
+                  '-f', 'rawvideo'
+                ])
                 .output(tempPixelPath)
                 .on('end', () => {
                   try {
@@ -192,7 +238,8 @@ ipcMain.handle('detect-green-color', async (event, videoPath) => {
                     resolvePixel(null);
                   }
                 })
-                .on('error', () => {
+                .on('error', (err) => {
+                  console.error(`Error extracting pixel at corner ${index}:`, err);
                   try {
                     if (fs.existsSync(tempPixelPath)) fs.unlinkSync(tempPixelPath);
                   } catch (e) {}
@@ -260,22 +307,78 @@ ipcMain.handle('process-video', async (event, options) => {
     // Determine output format based on file extension
     const isWebM = outputPath.toLowerCase().endsWith('.webm');
     const outputCodec = isWebM ? 'libvpx-vp9' : 'libx264';
-    const pixelFormat = isWebM ? 'yuva420p' : 'yuv420p';
     
-    // Build chromakey filter string
-    // FFmpeg chromakey filter: chromakey=color:similarity:blend
-    const chromakeyFilter = `chromakey=${color}:${similarity}:${blend}`;
+    // Build filter chain using chromakey
+    // Extract RGB values from color (for logging)
+    const colorInt = parseInt(color.replace('0x', ''), 16);
+    const r = (colorInt >> 16) & 0xFF;
+    const g = (colorInt >> 8) & 0xFF;
+    const b = colorInt & 0xFF;
     
-    // Build filters array - chromakey first, then blur if needed
-    let filters = [chromakeyFilter];
+    let filterString;
     
-    // Add edge blur AFTER chromakey for better results
-    if (edgeBlur > 0) {
-      filters.push(`boxblur=${edgeBlur}:${edgeBlur}:chroma_power=1`);
+    if (isWebM) {
+      // For WebM, use chromakey which supports transparency (alpha channel)
+      let webmFilters = [`chromakey=${color}:${similarity}:${blend}`];
+      
+      // Add edge blur AFTER chromakey for smoother edges
+      if (edgeBlur > 0) {
+        webmFilters.push(`boxblur=${edgeBlur}:${edgeBlur}:chroma_power=1`);
+      }
+      
+      // Join filters with comma for simple filter chain
+      filterString = webmFilters.join(',');
+    } else {
+      // For MP4, composite keyed video onto black background
+      // MP4/H.264 doesn't support transparency, so we overlay on black
+      // Filter chain: [0:v]chromakey[fg]; color[bg]; scale2ref; overlay
+      let mp4Filters = [];
+      
+      // Apply chromakey to input video and optionally blur, label as [fg]
+      // [0:v] references the video stream from first input
+      let foregroundFilter = `[0:v]chromakey=${color}:${similarity}:${blend}`;
+      if (edgeBlur > 0) {
+        foregroundFilter += `,boxblur=${edgeBlur}:${edgeBlur}:chroma_power=1`;
+      }
+      foregroundFilter += '[fg]';
+      mp4Filters.push(foregroundFilter);
+      
+      // Create black background using color filter
+      // Use size=2x2 and full parameter names for better compatibility
+      mp4Filters.push(`color=c=black:size=2x2:rate=25[bgsrc]`);
+      
+      // Use scale2ref to scale background to match foreground dimensions
+      // Output [bg] (scaled background) and [fg_scaled] (scaled foreground)
+      // Do NOT reuse [fg] as output label to avoid conflicts
+      mp4Filters.push(`[bgsrc][fg]scale2ref[bg][fg_scaled]`);
+      
+      // Overlay the scaled foreground on the background
+      // shortest=1 ensures output stops when shortest input ends
+      mp4Filters.push(`[bg][fg_scaled]overlay=shortest=1[out]`);
+      
+      // Join with semicolons for complex filter chain
+      filterString = mp4Filters.join(';');
     }
-
-    // Apply filters
-    command.videoFilters(filters);
+    
+    console.log('Applying filter chain:', filterString);
+    console.log('Output format:', isWebM ? 'WebM' : 'MP4');
+    console.log('Color values - R:', r, 'G:', g, 'B:', b);
+    console.log('Similarity:', similarity, 'Blend:', blend);
+    console.log('Input path:', inputPath);
+    console.log('Output path:', outputPath);
+    
+    // Apply filters using -vf for simple chains, -filter_complex for complex chains
+    if (isWebM) {
+      command.outputOptions(['-vf', filterString]);
+    } else {
+      // Use -filter_complex for MP4 since we have multiple labeled inputs
+      command.outputOptions(['-filter_complex', filterString]);
+      // Map the filtered video output and original audio BEFORE setting codec
+      // This ensures FFmpeg knows which streams to encode
+      command.outputOptions(['-map', '[out]']);
+      // Map audio if present (optional)
+      command.outputOptions(['-map', '0:a?']);
+    }
     
     // Set output options
     const outputOpts = ['-c:v', outputCodec];
@@ -284,9 +387,7 @@ ipcMain.handle('process-video', async (event, options) => {
     if (isWebM) {
       outputOpts.push('-pix_fmt', 'yuva420p');
     } else {
-      // For MP4, we can't have transparency, but chromakey will still work
-      // The removed areas will appear black/transparent in players that support it
-      // Or we could use format filter to add black background
+      // For MP4, use yuv420p (no transparency support)
       outputOpts.push('-pix_fmt', 'yuv420p');
     }
     
@@ -310,10 +411,18 @@ ipcMain.handle('process-video', async (event, options) => {
       ]);
     }
 
+    // Add additional options to ensure chromakey works correctly
+    command.outputOptions([
+      '-avoid_negative_ts', 'make_zero',
+      '-fflags', '+genpts'
+    ]);
+    
     command
       .output(outputPath)
       .on('start', (commandLine) => {
         console.log('FFmpeg process started:', commandLine);
+        console.log('Filter chain:', filterString);
+        console.log('Color:', color, 'Similarity:', similarity, 'Blend:', blend);
         event.sender.send('process-progress', { status: 'started', percent: 0 });
       })
       .on('progress', (progress) => {
@@ -329,10 +438,13 @@ ipcMain.handle('process-video', async (event, options) => {
         event.sender.send('process-progress', { status: 'completed', percent: 100 });
         resolve({ success: true, outputPath });
       })
-      .on('error', (err) => {
+      .on('error', (err, stdout, stderr) => {
         console.error('FFmpeg error:', err);
-        event.sender.send('process-progress', { status: 'error', error: err.message });
-        reject(err);
+        console.error('FFmpeg stderr:', stderr);
+        console.error('FFmpeg stdout:', stdout);
+        const errorMessage = stderr || err.message || 'Unknown FFmpeg error';
+        event.sender.send('process-progress', { status: 'error', error: errorMessage });
+        reject(new Error(errorMessage));
       })
       .run();
   });
