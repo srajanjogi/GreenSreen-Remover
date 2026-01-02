@@ -414,6 +414,99 @@
   border-radius: 12px;
 }
 
+.background-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.background-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.background-selected {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  background: #f0f7ff;
+  border: 1px solid #b3d9ff;
+  border-radius: 6px;
+}
+
+.background-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.background-type {
+  font-weight: 600;
+  color: #1e3a8a;
+  font-size: 0.9rem;
+}
+
+.background-filename {
+  font-size: 0.8rem;
+  color: #666;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.btn-remove-background {
+  background: #dc3545;
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  align-self: flex-start;
+}
+
+.btn-remove-background:hover:not(:disabled) {
+  background: #c82333;
+  transform: translateY(-1px);
+}
+
+.btn-remove-background:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.audio-select {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  font-weight: 500;
+  background: #fff;
+  color: #333;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.audio-select:hover:not(:disabled) {
+  border-color: #1e3a8a;
+}
+
+.audio-select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.audio-select:focus {
+  outline: none;
+  border-color: #1e3a8a;
+  box-shadow: 0 0 0 3px rgba(30, 58, 138, 0.1);
+}
+
 @media (max-width: 1024px) {
   .content {
     grid-template-columns: 1fr;

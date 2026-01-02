@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
   selectVideoFile: () => ipcRenderer.invoke('select-video-file'),
+  selectImageFile: () => ipcRenderer.invoke('select-image-file'),
   saveVideoFile: () => ipcRenderer.invoke('save-video-file'),
   processVideo: (options) => ipcRenderer.invoke('process-video', options),
   getVideoUrl: (filePath) => ipcRenderer.invoke('get-video-url', filePath),

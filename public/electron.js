@@ -134,6 +134,20 @@ ipcMain.handle('select-video-file', async () => {
   return null;
 });
 
+ipcMain.handle('select-image-file', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile'],
+    filters: [
+      { name: 'Images', extensions: ['jpg', 'jpeg', 'png', 'bmp', 'gif', 'webp'] }
+    ]
+  });
+
+  if (!result.canceled && result.filePaths.length > 0) {
+    return result.filePaths[0];
+  }
+  return null;
+});
+
 ipcMain.handle('save-video-file', async () => {
   const result = await dialog.showSaveDialog(mainWindow, {
     filters: [
@@ -299,10 +313,22 @@ ipcMain.handle('detect-green-color', async (event, videoPath) => {
 });
 
 ipcMain.handle('process-video', async (event, options) => {
-  const { inputPath, outputPath, color, similarity, blend, edgeBlur } = options;
+  const { inputPath, outputPath, color, similarity, blend, edgeBlur, backgroundPath, backgroundType, audioMode } = options;
 
   return new Promise((resolve, reject) => {
-    const command = ffmpeg(inputPath);
+    // If background is provided, we need to add it as an input
+    let command;
+    if (backgroundPath && backgroundType) {
+      command = ffmpeg().input(inputPath);
+      if (backgroundType === 'image') {
+        // For images, use loop input option to repeat the image
+        command.input(backgroundPath).inputOptions(['-loop', '1']);
+      } else {
+        command.input(backgroundPath);
+      }
+    } else {
+      command = ffmpeg(inputPath);
+    }
     
     // Determine output format based on file extension
     const isWebM = outputPath.toLowerCase().endsWith('.webm');
@@ -318,20 +344,47 @@ ipcMain.handle('process-video', async (event, options) => {
     let filterString;
     
     if (isWebM) {
-      // For WebM, use chromakey which supports transparency (alpha channel)
-      let webmFilters = [`chromakey=${color}:${similarity}:${blend}`];
-      
-      // Add edge blur AFTER chromakey for smoother edges
-      if (edgeBlur > 0) {
-        webmFilters.push(`boxblur=${edgeBlur}:${edgeBlur}:chroma_power=1`);
+      // For WebM, we can either keep transparency or composite over background
+      if (backgroundPath && backgroundType) {
+        // Composite over background for WebM too
+        let webmFilters = [];
+        
+        // Apply chromakey to input video
+        let foregroundFilter = `[0:v]chromakey=${color}:${similarity}:${blend}`;
+        if (edgeBlur > 0) {
+          foregroundFilter += `,boxblur=${edgeBlur}:${edgeBlur}:chroma_power=1`;
+        }
+        foregroundFilter += '[fg]';
+        webmFilters.push(foregroundFilter);
+        
+        // Handle background
+        if (backgroundType === 'image') {
+          // For images, we need to set framerate and scale to match foreground
+          // scale2ref will scale the background to match foreground dimensions
+          webmFilters.push(`[1:v]fps=fps=25[bgfps]`);
+          webmFilters.push(`[bgfps][fg]scale2ref[bg][fg_scaled]`);
+        } else if (backgroundType === 'video') {
+          // Scale background video to match foreground dimensions
+          webmFilters.push(`[1:v][fg]scale2ref[bg][fg_scaled]`);
+        }
+        
+        webmFilters.push(`[bg][fg_scaled]overlay=shortest=1[out]`);
+        filterString = webmFilters.join(';');
+      } else {
+        // For WebM without background, use chromakey which supports transparency (alpha channel)
+        let webmFilters = [`chromakey=${color}:${similarity}:${blend}`];
+        
+        // Add edge blur AFTER chromakey for smoother edges
+        if (edgeBlur > 0) {
+          webmFilters.push(`boxblur=${edgeBlur}:${edgeBlur}:chroma_power=1`);
+        }
+        
+        // Join filters with comma for simple filter chain
+        filterString = webmFilters.join(',');
       }
-      
-      // Join filters with comma for simple filter chain
-      filterString = webmFilters.join(',');
     } else {
-      // For MP4, composite keyed video onto black background
-      // MP4/H.264 doesn't support transparency, so we overlay on black
-      // Filter chain: [0:v]chromakey[fg]; color[bg]; scale2ref; overlay
+      // For MP4, composite keyed video onto background (image/video or black)
+      // MP4/H.264 doesn't support transparency, so we overlay on background
       let mp4Filters = [];
       
       // Apply chromakey to input video and optionally blur, label as [fg]
@@ -343,14 +396,21 @@ ipcMain.handle('process-video', async (event, options) => {
       foregroundFilter += '[fg]';
       mp4Filters.push(foregroundFilter);
       
-      // Create black background using color filter
-      // Use size=2x2 and full parameter names for better compatibility
-      mp4Filters.push(`color=c=black:size=2x2:rate=25[bgsrc]`);
-      
-      // Use scale2ref to scale background to match foreground dimensions
-      // Output [bg] (scaled background) and [fg_scaled] (scaled foreground)
-      // Do NOT reuse [fg] as output label to avoid conflicts
-      mp4Filters.push(`[bgsrc][fg]scale2ref[bg][fg_scaled]`);
+      // Determine background source
+      if (backgroundPath && backgroundType) {
+        if (backgroundType === 'image') {
+          // For image background, set framerate and scale to match foreground video dimensions
+          mp4Filters.push(`[1:v]fps=fps=25[bgfps]`);
+          mp4Filters.push(`[bgfps][fg]scale2ref[bg][fg_scaled]`);
+        } else if (backgroundType === 'video') {
+          // For video background, scale background video to match foreground dimensions
+          mp4Filters.push(`[1:v][fg]scale2ref[bg][fg_scaled]`);
+        }
+      } else {
+        // No background specified, use black
+        mp4Filters.push(`color=c=black:size=2x2:rate=25[bgsrc]`);
+        mp4Filters.push(`[bgsrc][fg]scale2ref[bg][fg_scaled]`);
+      }
       
       // Overlay the scaled foreground on the background
       // shortest=1 ensures output stops when shortest input ends
@@ -368,16 +428,49 @@ ipcMain.handle('process-video', async (event, options) => {
     console.log('Output path:', outputPath);
     
     // Apply filters using -vf for simple chains, -filter_complex for complex chains
-    if (isWebM) {
+    const hasBackground = backgroundPath && backgroundType;
+    const hasVideoBackground = hasBackground && backgroundType === 'video';
+    
+    // Handle audio based on audioMode
+    // Safety check: if audioMode requires background video but we don't have it, use foreground
+    let effectiveAudioMode = audioMode;
+    if ((audioMode === 'background' || audioMode === 'mix') && !hasVideoBackground) {
+      effectiveAudioMode = 'foreground';
+    }
+    
+    let audioFilterString = null;
+    if (effectiveAudioMode === 'mix' && hasVideoBackground) {
+      // Mix both audio tracks using amix filter
+      audioFilterString = '[0:a][1:a]amix=inputs=2:duration=longest:dropout_transition=2[audio_out]';
+    }
+    
+    if (isWebM && !hasBackground) {
+      // Simple filter chain for WebM without background
       command.outputOptions(['-vf', filterString]);
+      // Map audio based on mode
+      if (effectiveAudioMode !== 'none') {
+        command.outputOptions(['-map', '0:a?']);
+      }
     } else {
-      // Use -filter_complex for MP4 since we have multiple labeled inputs
-      command.outputOptions(['-filter_complex', filterString]);
-      // Map the filtered video output and original audio BEFORE setting codec
-      // This ensures FFmpeg knows which streams to encode
+      // Use -filter_complex for complex chains (with background or MP4)
+      let complexFilter = filterString;
+      if (audioFilterString) {
+        // Combine video and audio filters
+        complexFilter = `${filterString};${audioFilterString}`;
+      }
+      command.outputOptions(['-filter_complex', complexFilter]);
+      // Map the filtered video output
       command.outputOptions(['-map', '[out]']);
-      // Map audio if present (optional)
-      command.outputOptions(['-map', '0:a?']);
+      
+      // Map audio based on effective mode
+      if (effectiveAudioMode === 'foreground') {
+        command.outputOptions(['-map', '0:a?']);
+      } else if (effectiveAudioMode === 'background' && hasVideoBackground) {
+        command.outputOptions(['-map', '1:a?']);
+      } else if (effectiveAudioMode === 'mix' && hasVideoBackground) {
+        command.outputOptions(['-map', '[audio_out]']);
+      }
+      // If effectiveAudioMode is 'none', don't map any audio
     }
     
     // Set output options
@@ -385,7 +478,13 @@ ipcMain.handle('process-video', async (event, options) => {
     
     // Set pixel format - WebM supports transparency, MP4 needs yuv420p
     if (isWebM) {
-      outputOpts.push('-pix_fmt', 'yuva420p');
+      // If using background, we don't need alpha channel (yuva420p)
+      // If no background, use yuva420p for transparency
+      if (backgroundPath && backgroundType) {
+        outputOpts.push('-pix_fmt', 'yuv420p');
+      } else {
+        outputOpts.push('-pix_fmt', 'yuva420p');
+      }
     } else {
       // For MP4, use yuv420p (no transparency support)
       outputOpts.push('-pix_fmt', 'yuv420p');

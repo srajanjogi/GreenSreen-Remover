@@ -14,6 +14,9 @@ function App() {
     edgeBlur: 0 // 0-100 range
   });
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [backgroundPath, setBackgroundPath] = useState(null);
+  const [backgroundType, setBackgroundType] = useState(null); // 'image' or 'video' or null
+  const [audioMode, setAudioMode] = useState('foreground'); // 'foreground', 'background', 'mix', 'none'
 
   const videoRef = useRef(null);
 
@@ -93,7 +96,10 @@ function App() {
         color: colorValue,
         similarity: similarity,
         blend: blend,
-        edgeBlur: edgeBlur
+        edgeBlur: edgeBlur,
+        backgroundPath: backgroundPath,
+        backgroundType: backgroundType,
+        audioMode: audioMode
       });
 
       // Only update the preview if this is a preview operation
@@ -161,6 +167,30 @@ function App() {
       ...prev,
       [key]: value
     }));
+  };
+
+  const handleSelectBackground = async (type) => {
+    if (!window.electronAPI) {
+      alert('Electron API not available');
+      return;
+    }
+
+    let filePath;
+    if (type === 'image') {
+      filePath = await window.electronAPI.selectImageFile();
+    } else if (type === 'video') {
+      filePath = await window.electronAPI.selectVideoFile();
+    }
+
+    if (filePath) {
+      setBackgroundPath(filePath);
+      setBackgroundType(type);
+    }
+  };
+
+  const handleRemoveBackground = () => {
+    setBackgroundPath(null);
+    setBackgroundType(null);
   };
 
   return (
@@ -277,6 +307,86 @@ function App() {
                 />
               </label>
             </div>
+
+            <div className="setting-group">
+              <label>
+                <div className="label-with-icon">
+                  <span className="icon-picker">🖼️</span>
+                  Background Replacement
+                </div>
+                <div className="background-controls">
+                  {!backgroundPath ? (
+                    <div className="background-buttons">
+                      <button
+                        className="btn btn-secondary"
+                        onClick={() => handleSelectBackground('image')}
+                        disabled={processing}
+                        style={{ marginBottom: '8px', width: '100%' }}
+                      >
+                        Select Image Background
+                      </button>
+                      <button
+                        className="btn btn-secondary"
+                        onClick={() => handleSelectBackground('video')}
+                        disabled={processing}
+                        style={{ width: '100%' }}
+                      >
+                        Select Video Background
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="background-selected">
+                      <div className="background-info">
+                        <span className="background-type">
+                          {backgroundType === 'image' ? '🖼️' : '🎬'} 
+                          {backgroundType === 'image' ? 'Image' : 'Video'} Background
+                        </span>
+                        <span className="background-filename" title={backgroundPath}>
+                          {backgroundPath.split(/[/\\]/).pop()}
+                        </span>
+                      </div>
+                      <button
+                        className="btn-remove-background"
+                        onClick={handleRemoveBackground}
+                        disabled={processing}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  )}
+                </div>
+                <span className="setting-hint">Replace the removed green screen with an image or video</span>
+              </label>
+            </div>
+
+            {(backgroundPath && backgroundType === 'video') && (
+              <div className="setting-group">
+                <label htmlFor="audioMode">
+                  <div className="label-with-icon">
+                    <span className="icon-picker">🔊</span>
+                    Audio Source
+                  </div>
+                  <select
+                    id="audioMode"
+                    value={audioMode}
+                    onChange={(e) => setAudioMode(e.target.value)}
+                    disabled={processing}
+                    className="audio-select"
+                  >
+                    <option value="foreground">Foreground Video Audio</option>
+                    <option value="background">Background Video Audio</option>
+                    <option value="mix">Mix Both Audios</option>
+                    <option value="none">No Audio</option>
+                  </select>
+                  <span className="setting-hint">
+                    {audioMode === 'foreground' && 'Uses audio from the main video'}
+                    {audioMode === 'background' && 'Uses audio from the background video'}
+                    {audioMode === 'mix' && 'Mixes both audio tracks together'}
+                    {audioMode === 'none' && 'Output will have no audio'}
+                  </span>
+                </label>
+              </div>
+            )}
 
             <button 
               className="btn-advanced"
